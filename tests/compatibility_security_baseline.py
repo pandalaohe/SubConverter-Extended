@@ -5543,6 +5543,87 @@ def select_health_check_output_baseline(base_url: str, fixture_base: str) -> Non
             )
 
 
+def native_group_base_fields_baseline(base_url: str, fixture_base: str) -> None:
+    base_group = (
+        "  - name: Native\n"
+        "    type: select\n"
+        "    proxies: [StaleNode]\n"
+        "    use: [StaleProvider]\n"
+        "    filter: StaleRegex\n"
+        "    exclude-filter: StaleExclude\n"
+        "    include-all: true\n"
+        "    url: https://base.example.test/check\n"
+        "    interval: 999\n"
+        "    expected-status: 200/405\n"
+        "    lazy: false\n"
+        "    timeout: 3000\n"
+    )
+    cases = (
+        ("modern", "proxy-groups:\n" + base_group +
+         "  - name: BaseOnly\n    type: select\n    proxies: [DIRECT]\n", True),
+        ("legacy", "Proxy Group:\n" + base_group, True),
+        ("missing", "", False),
+        ("null", "proxy-groups: null\n", False),
+        ("scalar", "proxy-groups: invalid\n", False),
+        ("unnamed", "proxy-groups:\n  - type: select\n    lazy: false\n", False),
+    )
+    ini_group = (
+        "custom_proxy_group=Native`fallback`Smoke`"
+        "https://ini.example.test/check`45,5\n"
+    )
+    for label, groups, inherits in cases:
+        base = fixture_data_url("mixed-port: 7890\n" + groups)
+        config = fixture_data_url(
+            "enable_rule_generator=false\n"
+            f"clash_rule_base={base}\n" + ini_group
+        )
+        status, body, _ = request(base_url, "/sub", {
+            "target": "clash", "url": SUBSCRIPTION.strip(), "config": config,
+            "new_name": "true",
+        })
+        output = body.decode("utf-8", errors="replace")
+        if status != 200:
+            raise AssertionError(f"{label} native-group conversion failed: {status} {output[-800:]!r}")
+        block = proxy_group_block_from_output(output.split("proxy-groups:\n", 1)[-1], "Native")
+        for field, value in (("type", "fallback"), ("url", "https://ini.example.test/check"),
+                             ("interval", "45")):
+            if re.search(rf'(?m)^    {field}: ["\']?{re.escape(value)}["\']?\s*$', block) is None:
+                raise AssertionError(f"{label} INI {field} did not win:\n{block}")
+        if re.search(r"(?m)^      - Smoke\s*$", block) is None and "proxies: [Smoke]" not in block:
+            raise AssertionError(f"{label} INI node membership was lost:\n{block}")
+        if any(stale in block for stale in ("StaleNode", "StaleProvider", "StaleRegex",
+                                             "StaleExclude", "include-all:")):
+            raise AssertionError(f"{label} retained base membership controls:\n{block}")
+        for field, value in (("expected-status", "200/405"), ("lazy", "false"),
+                             ("timeout", "3000")):
+            present = re.search(rf'(?m)^    {field}: ["\']?{value}["\']?\s*$', block) is not None
+            if present is not inherits:
+                raise AssertionError(f"{label} inherited native field {field} incorrectly:\n{block}")
+        if "name: BaseOnly" in output:
+            raise AssertionError("base-only group was imported without an INI declaration")
+
+    provider_base = fixture_data_url("proxy-groups:\n" + base_group)
+    provider_config = fixture_data_url(
+        "enable_rule_generator=false\n"
+        f"clash_rule_base={provider_base}\n"
+        "custom_proxy_group=Native`fallback`.*`https://ini.example.test/check`45,5\n"
+    )
+    status, body, _ = request(base_url, "/sub", {
+        "target": "clash",
+        "url": f"provider:Current,{fixture_base}/subscription.txt",
+        "config": provider_config,
+        "new_name": "true",
+    })
+    output = body.decode("utf-8", errors="replace")
+    if status != 200:
+        raise AssertionError(f"provider native-group conversion failed: {status} {output[-800:]!r}")
+    block = proxy_group_block_from_output(output, "Native")
+    if "StaleProvider" in block or "StaleNode" in block or "StaleRegex" in block:
+        raise AssertionError(f"provider group retained stale base members:\n{block}")
+    if "use:" not in block or "Current" not in block:
+        raise AssertionError(f"provider group did not select INI provider membership:\n{block}")
+
+
 def provider_interval_from_output(output: str, provider_name: str) -> int:
     block = provider_block_from_output(output, provider_name)
     interval = re.search(r"(?m)^    interval: ([0-9]+)\s*$", block)
@@ -14126,6 +14207,7 @@ def main() -> int:
             simple_target_protocol_baseline(base_url, fixture_base)
             provider_direct_default_output_baseline(base_url, fixture_base)
             select_health_check_output_baseline(base_url, fixture_base)
+            native_group_base_fields_baseline(base_url, fixture_base)
         if not wireguard_outbound_logs or (
             "SINGBOX_WIREGUARD_GENERATION schema=outbound nodes=1 peers=2"
             not in wireguard_outbound_logs[0]

@@ -1946,9 +1946,55 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode,
                  " 个 proxy provider。");
   }
 
+  // Read optional base groups without creating keys in the source document.
+  YAML::Node base_groups(YAML::NodeType::Sequence);
+  if (yamlnode.IsMap()) {
+    const char *group_keys[] = {"proxy-groups", "Proxy Group"};
+    for (const char *key : group_keys) {
+      bool found = false;
+      for (const auto &entry : yamlnode) {
+        if (entry.first.IsScalar() && entry.first.as<std::string>() == key &&
+            entry.second.IsSequence()) {
+          base_groups = YAML::Clone(entry.second);
+          found = true;
+          break;
+        }
+      }
+      if (found)
+        break;
+    }
+  }
+
   for (const ProxyGroupConfig &x : extra_proxy_group) {
     YAML::Node singlegroup;
     string_array filtered_nodelist;
+
+    // Retain native fields from a matching base group while INI owns members.
+    if (base_groups.IsSequence()) {
+      for (const YAML::Node &base_group : base_groups) {
+        if (!base_group.IsMap())
+          continue;
+        bool matching_name = false;
+        for (const auto &field : base_group)
+          if (field.first.IsScalar() &&
+              field.first.as<std::string>() == "name" &&
+              field.second.IsScalar() &&
+              field.second.as<std::string>() == x.Name) {
+            matching_name = true;
+            break;
+          }
+        if (!matching_name)
+          continue;
+        singlegroup = YAML::Clone(base_group);
+        const char *member_keys[] = {"proxies", "use", "filter",
+                                     "exclude-filter", "exclude-type",
+                                     "include-all", "include-all-proxies",
+                                     "include-all-providers"};
+        for (const char *key : member_keys)
+          singlegroup.remove(key);
+        break;
+      }
+    }
 
     singlegroup["name"] = x.Name;
     if (x.Type == ProxyGroupType::Smart)
